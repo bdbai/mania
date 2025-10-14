@@ -78,7 +78,10 @@ pub trait SignProvider: Send + Sync {
 
 pub fn default_sign_provider(protocol: Protocol, url: Option<String>) -> Box<dyn SignProvider> {
     match protocol {
-        Protocol::Linux => Box::new(linux::LinuxSignProvider { url }),
+        Protocol::Linux => Box::new(linux::LinuxSignProvider {
+            url,
+            sock: Default::default(),
+        }),
         _ => unimplemented!(),
     }
 }

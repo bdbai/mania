@@ -1,9 +1,14 @@
+use std::env;
+
 use crate::core::http;
 use crate::core::sign::{SignProvider, SignResult};
 use crate::utility::extensions::HexString;
 use bytes::Bytes;
 use reqwest::header::HeaderMap;
 use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{UnixSocket, UnixStream};
+use tokio::sync::{Mutex, OnceCell};
 
 #[derive(Serialize)]
 struct SignServerReq {
@@ -21,10 +26,58 @@ struct SignServerResp {
 
 pub struct LinuxSignProvider {
     pub url: Option<String>,
+    pub sock: OnceCell<Mutex<UnixStream>>,
 }
 
 impl SignProvider for LinuxSignProvider {
     fn sign_impl(&self, cmd: &str, seq: u32, body: &[u8]) -> Option<SignResult> {
+        if let Some("sock") = env::var("MANIA_LINUX_SIGN_MODE").ok().as_deref() {
+            self.sign_impl_sock(cmd, seq, body)
+        } else {
+            self.sign_impl_http(cmd, seq, body)
+        }
+    }
+}
+
+impl LinuxSignProvider {
+    fn sign_impl_sock(&self, cmd: &str, seq: u32, body: &[u8]) -> Option<SignResult> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let socket = self
+                    .sock
+                    .get_or_init(|| async {
+                        let socket = UnixSocket::new_stream().unwrap();
+                        let sock_file = env::var("MANIA_LINUX_SIGN_SOCK").unwrap();
+                        Mutex::new(socket.connect(sock_file).await.unwrap())
+                    })
+                    .await;
+                let mut socket = socket.lock().await;
+                // 0x1 + length of body in 4 bytes (network order) + 4 bytes seq + null terminated cmd + body
+                let mut req = Vec::with_capacity(1 + 4 + 4 + cmd.len() + 1 + body.len());
+                req.push(0x1);
+                let body_len = (4 + cmd.len() + 1 + body.len()) as u32;
+                req.extend_from_slice(&body_len.to_be_bytes());
+                req.extend_from_slice(&seq.to_be_bytes());
+                req.extend_from_slice(cmd.as_bytes());
+                req.push(0);
+                req.extend_from_slice(body);
+                socket.write_all(&req).await.unwrap();
+                let str1_len = socket.read_u32().await.unwrap();
+                let str2_len = socket.read_u32().await.unwrap();
+                let str3_len = socket.read_u32().await.unwrap();
+                let mut resp = vec![0; (str1_len + str2_len + str3_len) as usize];
+                socket.read_exact(&mut resp).await.unwrap();
+                Some(SignResult {
+                    token: String::from_utf8_lossy(&resp[0..str1_len as usize]).into(),
+                    extra: Bytes::copy_from_slice(
+                        &resp[str1_len as usize..(str1_len + str2_len) as usize],
+                    ),
+                    sign: Bytes::copy_from_slice(&resp[(str1_len + str2_len) as usize..]),
+                })
+            })
+        })
+    }
+    fn sign_impl_http(&self, cmd: &str, seq: u32, body: &[u8]) -> Option<SignResult> {
         let dummy_sign = || -> SignResult {
             SignResult {
                 sign: Bytes::from(&[0u8; 20][..]),
