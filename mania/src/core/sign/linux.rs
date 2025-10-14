@@ -8,7 +8,7 @@ use reqwest::header::HeaderMap;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixSocket, UnixStream};
-use tokio::sync::{Mutex, OnceCell};
+use tokio::sync::Mutex;
 
 #[derive(Serialize)]
 struct SignServerReq {
@@ -26,7 +26,7 @@ struct SignServerResp {
 
 pub struct LinuxSignProvider {
     pub url: Option<String>,
-    pub sock: OnceCell<Mutex<UnixStream>>,
+    pub sock: Mutex<Option<UnixStream>>,
 }
 
 impl SignProvider for LinuxSignProvider {
@@ -40,18 +40,22 @@ impl SignProvider for LinuxSignProvider {
 }
 
 impl LinuxSignProvider {
+    async fn connect_sock() -> UnixStream {
+        let socket = UnixSocket::new_stream().unwrap();
+        let sock_file = env::var("MANIA_LINUX_SIGN_SOCK").unwrap();
+        let stream = socket.connect(sock_file).await.unwrap();
+        stream
+    }
     fn sign_impl_sock(&self, cmd: &str, seq: u32, body: &[u8]) -> Option<SignResult> {
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                let socket = self
-                    .sock
-                    .get_or_init(|| async {
-                        let socket = UnixSocket::new_stream().unwrap();
-                        let sock_file = env::var("MANIA_LINUX_SIGN_SOCK").unwrap();
-                        Mutex::new(socket.connect(sock_file).await.unwrap())
-                    })
-                    .await;
-                let mut socket = socket.lock().await;
+                let mut socket_guard = self.sock.lock().await;
+                let mut socket = if let Some(socket) = &mut *socket_guard {
+                    socket
+                } else {
+                    let new_socket = Self::connect_sock().await;
+                    socket_guard.insert(new_socket)
+                };
                 // 0x1 + length of body in 4 bytes (network order) + 4 bytes seq + null terminated cmd + body
                 let mut req = Vec::with_capacity(1 + 4 + 4 + cmd.len() + 1 + body.len());
                 req.push(0x1);
@@ -61,7 +65,11 @@ impl LinuxSignProvider {
                 req.extend_from_slice(cmd.as_bytes());
                 req.push(0);
                 req.extend_from_slice(body);
-                socket.write_all(&req).await.unwrap();
+                if let Err(e) = socket.write_all(&req).await {
+                    tracing::error!("failed to write to sign socket, reconnecting: {}", e);
+                    socket = socket_guard.insert(Self::connect_sock().await);
+                    socket.write_all(&req).await.unwrap();
+                }
                 let str1_len = socket.read_u32().await.unwrap();
                 let str2_len = socket.read_u32().await.unwrap();
                 let str3_len = socket.read_u32().await.unwrap();
