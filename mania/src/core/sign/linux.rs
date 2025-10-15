@@ -7,8 +7,16 @@ use bytes::Bytes;
 use reqwest::header::HeaderMap;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+#[cfg(not(unix))]
+use tokio::net::TcpStream;
+#[cfg(unix)]
 use tokio::net::{UnixSocket, UnixStream};
 use tokio::sync::Mutex;
+
+#[cfg(unix)]
+type SockStream = UnixStream;
+#[cfg(not(unix))]
+type SockStream = TcpStream;
 
 #[derive(Serialize)]
 struct SignServerReq {
@@ -26,7 +34,7 @@ struct SignServerResp {
 
 pub struct LinuxSignProvider {
     pub url: Option<String>,
-    pub sock: Mutex<Option<UnixStream>>,
+    pub sock: Mutex<Option<SockStream>>,
 }
 
 impl SignProvider for LinuxSignProvider {
@@ -40,13 +48,28 @@ impl SignProvider for LinuxSignProvider {
 }
 
 impl LinuxSignProvider {
+    #[cfg(unix)]
     async fn connect_sock() -> UnixStream {
         let socket = UnixSocket::new_stream().unwrap();
         let sock_file = env::var("MANIA_LINUX_SIGN_SOCK").unwrap();
         let stream = socket.connect(sock_file).await.unwrap();
         stream
     }
+    #[cfg(not(unix))]
+    async fn connect_sock() -> TcpStream {
+        use tokio::net::TcpSocket;
+
+        let socket = TcpSocket::new_v4().unwrap();
+        let addr = env::var("MANIA_LINUX_SIGN_SOCK").unwrap().parse().unwrap();
+        socket.connect(addr).await.unwrap()
+    }
     fn sign_impl_sock(&self, cmd: &str, seq: u32, body: &[u8]) -> Option<SignResult> {
+        tracing::debug!(
+            "sign request: cmd={}, seq={}, body={}",
+            cmd,
+            seq,
+            body.hex()
+        );
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
                 let mut socket_guard = self.sock.lock().await;
@@ -75,13 +98,21 @@ impl LinuxSignProvider {
                 let str3_len = socket.read_u32().await.unwrap();
                 let mut resp = vec![0; (str1_len + str2_len + str3_len) as usize];
                 socket.read_exact(&mut resp).await.unwrap();
-                Some(SignResult {
+                let res = SignResult {
                     token: String::from_utf8_lossy(&resp[0..str1_len as usize]).into(),
                     extra: Bytes::copy_from_slice(
                         &resp[str1_len as usize..(str1_len + str2_len) as usize],
                     ),
                     sign: Bytes::copy_from_slice(&resp[(str1_len + str2_len) as usize..]),
-                })
+                };
+                tracing::debug!(
+                    "sign response for seq {}: token={}, extra={}, sign={}",
+                    seq,
+                    res.token,
+                    res.extra.hex(),
+                    res.sign.hex()
+                );
+                Some(res)
             })
         })
     }
