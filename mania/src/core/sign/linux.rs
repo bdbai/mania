@@ -1,4 +1,5 @@
 use std::env;
+use std::time::Duration;
 
 use crate::core::http;
 use crate::core::sign::{SignProvider, SignResult};
@@ -6,17 +7,19 @@ use crate::utility::extensions::HexString;
 use bytes::Bytes;
 use reqwest::header::HeaderMap;
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, Interest};
 #[cfg(not(unix))]
 use tokio::net::TcpStream;
 #[cfg(unix)]
 use tokio::net::{UnixSocket, UnixStream};
 use tokio::sync::Mutex;
+use tokio::time::timeout;
 
 #[cfg(unix)]
 type SockStream = UnixStream;
 #[cfg(not(unix))]
 type SockStream = TcpStream;
+const SOCK_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Serialize)]
 struct SignServerReq {
@@ -60,6 +63,7 @@ impl LinuxSignProvider {
         use tokio::net::TcpSocket;
 
         let socket = TcpSocket::new_v4().unwrap();
+        socket.nodelay().unwrap();
         let addr = env::var("MANIA_LINUX_SIGN_SOCK").unwrap().parse().unwrap();
         socket.connect(addr).await.unwrap()
     }
@@ -70,6 +74,17 @@ impl LinuxSignProvider {
             seq,
             body.hex()
         );
+
+        // 0x1 + length of body in 4 bytes (network order) + 4 bytes seq + null terminated cmd + body
+        let mut req = Vec::with_capacity(1 + 4 + 4 + cmd.len() + 1 + body.len());
+        req.push(0x1);
+        let body_len = (4 + cmd.len() + 1 + body.len()) as u32;
+        req.extend_from_slice(&body_len.to_be_bytes());
+        req.extend_from_slice(&seq.to_be_bytes());
+        req.extend_from_slice(cmd.as_bytes());
+        req.push(0);
+        req.extend_from_slice(body);
+
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
                 let mut socket_guard = self.sock.lock().await;
@@ -77,33 +92,24 @@ impl LinuxSignProvider {
                     socket
                 } else {
                     let new_socket = Self::connect_sock().await;
+                    tracing::info!("connected to sign socket");
                     socket_guard.insert(new_socket)
                 };
-                // 0x1 + length of body in 4 bytes (network order) + 4 bytes seq + null terminated cmd + body
-                let mut req = Vec::with_capacity(1 + 4 + 4 + cmd.len() + 1 + body.len());
-                req.push(0x1);
-                let body_len = (4 + cmd.len() + 1 + body.len()) as u32;
-                req.extend_from_slice(&body_len.to_be_bytes());
-                req.extend_from_slice(&seq.to_be_bytes());
-                req.extend_from_slice(cmd.as_bytes());
-                req.push(0);
-                req.extend_from_slice(body);
-                if let Err(e) = socket.write_all(&req).await {
-                    tracing::error!("failed to write to sign socket, reconnecting: {}", e);
-                    socket = socket_guard.insert(Self::connect_sock().await);
-                    socket.write_all(&req).await.unwrap();
-                }
-                let str1_len = socket.read_u32().await.unwrap();
-                let str2_len = socket.read_u32().await.unwrap();
-                let str3_len = socket.read_u32().await.unwrap();
-                let mut resp = vec![0; (str1_len + str2_len + str3_len) as usize];
-                socket.read_exact(&mut resp).await.unwrap();
-                let res = SignResult {
-                    token: String::from_utf8_lossy(&resp[0..str1_len as usize]).into(),
-                    extra: Bytes::copy_from_slice(
-                        &resp[str1_len as usize..(str1_len + str2_len) as usize],
-                    ),
-                    sign: Bytes::copy_from_slice(&resp[(str1_len + str2_len) as usize..]),
+                let res = match Self::sign_impl_sock_send(&mut socket, &req).await {
+                    Ok(res) => res,
+                    Err(e) => {
+                        tracing::error!("failed to send sign socket request, reconnecting: {e:?}");
+                        let new_socket = Self::connect_sock().await;
+                        tracing::info!("reconnected to sign socket");
+                        socket = socket_guard.insert(new_socket);
+                        match Self::sign_impl_sock_send(&mut socket, &req).await {
+                            Ok(res) => res,
+                            Err(e) => {
+                                tracing::error!("failed to sign via socket, gave up: {e:?}");
+                                return None;
+                            }
+                        }
+                    }
                 };
                 tracing::debug!(
                     "sign response for seq {}: token={}, extra={}, sign={}",
@@ -114,6 +120,24 @@ impl LinuxSignProvider {
                 );
                 Some(res)
             })
+        })
+    }
+    async fn sign_impl_sock_send(
+        socket: &mut SockStream,
+        req: &[u8],
+    ) -> std::io::Result<SignResult> {
+        socket.write_all(&req).await?;
+        socket.flush().await?;
+        timeout(SOCK_READ_TIMEOUT, socket.ready(Interest::READABLE)).await??;
+        let str1_len = socket.read_u32().await?;
+        let str2_len = socket.read_u32().await?;
+        let str3_len = socket.read_u32().await?;
+        let mut resp = vec![0; (str1_len + str2_len + str3_len) as usize];
+        socket.read_exact(&mut resp).await?;
+        Ok(SignResult {
+            token: String::from_utf8_lossy(&resp[0..str1_len as usize]).into(),
+            extra: Bytes::copy_from_slice(&resp[str1_len as usize..(str1_len + str2_len) as usize]),
+            sign: Bytes::copy_from_slice(&resp[(str1_len + str2_len) as usize..]),
         })
     }
     fn sign_impl_http(&self, cmd: &str, seq: u32, body: &[u8]) -> Option<SignResult> {
