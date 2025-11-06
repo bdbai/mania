@@ -298,6 +298,7 @@ async fn messaging_logic_incoming(
                         group_member_decrease::GroupMemberDecreaseEvent {
                             group_uin: leave.group_uin,
                             member_uin,
+                            member_uid: leave.member_uid.clone(),
                             operator_uin,
                             event_type: std::mem::take(&mut leave.event_type),
                         },

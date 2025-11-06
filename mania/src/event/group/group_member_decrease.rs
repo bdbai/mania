@@ -5,6 +5,7 @@ pub use mania_macros::ManiaEvent;
 pub struct GroupMemberDecreaseEvent {
     pub group_uin: u32,
     pub member_uin: u32,
+    pub member_uid: String,
     pub operator_uin: Option<u32>,
     pub event_type: GroupMemberDecreaseEventType,
 }
