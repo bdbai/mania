@@ -40,6 +40,7 @@ pub struct LinuxSignProvider {
     pub sock: Mutex<Option<SockStream>>,
 }
 
+// TODO: use async impl
 impl SignProvider for LinuxSignProvider {
     fn sign_impl(&self, cmd: &str, seq: u32, body: &[u8]) -> Option<SignResult> {
         if let Some("sock") = env::var("MANIA_LINUX_SIGN_MODE").ok().as_deref() {
