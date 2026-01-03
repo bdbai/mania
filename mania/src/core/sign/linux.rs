@@ -102,7 +102,7 @@ impl LinuxSignProvider {
                         let new_socket = Self::connect_sock().await;
                         tracing::info!("reconnected to sign socket");
                         socket = socket_guard.insert(new_socket);
-                        match Self::sign_impl_sock_send(&mut socket, &req).await {
+                        match Self::sign_impl_sock_send(socket, &req).await {
                             Ok(res) => res,
                             Err(e) => {
                                 tracing::error!("failed to sign via socket, gave up: {e:?}");
