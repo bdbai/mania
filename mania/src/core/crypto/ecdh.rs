@@ -2,7 +2,7 @@ use crate::core::crypto::tea;
 use digest::Digest;
 use md5::Md5;
 use elliptic_curve::Generate;
-use elliptic_curve::sec1::EncodedPoint;
+use elliptic_curve::sec1::Sec1Point;
 use p256::ecdh::EphemeralSecret;
 use p256::PublicKey;
 use rand::rngs::SysRng;
@@ -76,7 +76,7 @@ impl Ecdh for P256 {
         let share_key = Self::key_exchange(c_pri_key, s_pub_key)
             .expect("Failed to generate shared key from key exchange");
         Self {
-            public: EncodedPoint::from(c_pub_key).as_bytes().to_vec(),
+            public: Sec1Point::from(c_pub_key).as_bytes().to_vec(),
             shared: share_key,
         }
     }
