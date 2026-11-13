@@ -1,6 +1,7 @@
 use crate::core::crypto::tea;
 use digest::Digest;
 use md5::Md5;
+use elliptic_curve::Generate;
 use elliptic_curve::sec1::EncodedPoint;
 use p256::ecdh::EphemeralSecret;
 use p256::PublicKey;
@@ -69,7 +70,8 @@ impl Ecdh for P256 {
     fn new(server_public_key: [u8; 65]) -> Self {
         let s_pub_key =
             PublicKey::from_sec1_bytes(&server_public_key).expect("Failed to parse public key");
-        let c_pri_key = EphemeralSecret::random(&mut SysRng);
+        let c_pri_key = EphemeralSecret::try_generate_from_rng(&mut SysRng)
+            .expect("RNG failure");
         let c_pub_key = c_pri_key.public_key();
         let share_key = Self::key_exchange(c_pri_key, s_pub_key)
             .expect("Failed to generate shared key from key exchange");
@@ -94,9 +96,9 @@ mod test {
     #[test]
     fn test_ecdh_p256() {
         let mut rng = SysRng;
-        let server_secret = EphemeralSecret::random(&mut rng);
+        let server_secret = EphemeralSecret::try_generate_from_rng(&mut rng).unwrap();
         let server_public = server_secret.public_key();
-        let client_secret = EphemeralSecret::random(&mut rng);
+        let client_secret = EphemeralSecret::try_generate_from_rng(&mut rng).unwrap();
         let client_public = client_secret.public_key();
         let server_pubkey = PublicKey::from_sec1_bytes(&server_public.to_sec1_bytes())
             .expect("failed to parse server public key");
