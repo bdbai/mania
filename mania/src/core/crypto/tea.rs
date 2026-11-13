@@ -2,7 +2,7 @@
 use byteorder::{BigEndian, ByteOrder};
 pub use generic_array::GenericArray;
 pub use generic_array::typenum::U16;
-use rand::{RngCore, rng};
+use rand::{Rng, rng};
 
 pub fn tea_encrypt(text: &[u8], key: &[u8]) -> Vec<u8> {
     let fill_count = 9 - (text.len() + 1) % 8;

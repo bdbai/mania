@@ -3,7 +3,7 @@ use crate::core::crypto::ecdh::{ECDH_256_PEER_LOGIN_KEY, Ecdh, P256};
 use crate::core::key_store::KeyStore;
 use crate::core::session::Session;
 use crate::core::sign::SignProvider;
-use rand::Rng;
+use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::{fs, io};

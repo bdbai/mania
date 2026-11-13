@@ -6,7 +6,7 @@ use std::sync::atomic::AtomicU32;
 use byteorder::{BigEndian, ByteOrder, WriteBytesExt};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use prost::Message;
-use rand::Rng;
+use rand::RngExt;
 use thiserror::Error;
 
 use crate::core::context::Context;
